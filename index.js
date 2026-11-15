@@ -22,7 +22,7 @@ function info() {
     apiversion: "1",
     author: "VeerHarsh",
     color: "#00FF00",
-    head: "pirate",
+    head: "tiger-king",
     tail: "tiger-tail",
   };
 }
