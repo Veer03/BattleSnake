@@ -273,10 +273,9 @@ function rivalPlan(ctx, st, stamp) {
     if (st.snakes[i].alive) candidates.push({ i, d: cellDist(ctx, myHead, st.snakes[i].body[0]) });
   }
   candidates.sort((a, b) => a.d - b.d);
-  // On 11x11, every rival can become an immediate threat within a few turns.
-  // Model all their legal replies instead of guessing for the farthest snake.
-  const trackCount = ctx.N <= 121 ? candidates.length : TREE_RIVALS;
-  const tracked = new Set(candidates.slice(0, trackCount).map((x) => x.i));
+  // Use exact replies for the closest rivals; assuming every distant snake
+  // coordinates against us makes free-for-all play needlessly defensive.
+  const tracked = new Set(candidates.slice(0, TREE_RIVALS).map((x) => x.i));
   for (const x of candidates) if (x.d <= TREE_RADIUS) tracked.add(x.i);
 
   for (let i = 1; i < n; i++) {
