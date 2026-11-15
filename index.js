@@ -37,7 +37,32 @@ function end(gameState) {
 }
 
 function move(gameState) {
-  return { move: chooseMove(gameState) };
+  try {
+    return { move: chooseMove(gameState) };
+  } catch (err) {
+    const dirs = [
+      ["up", 0, 1], ["down", 0, -1], ["left", -1, 0], ["right", 1, 0],
+    ];
+    const head = gameState?.you?.body?.[0];
+    const board = gameState?.board;
+    const body = gameState?.you?.body ?? [];
+    const snakes = gameState?.board?.snakes ?? [];
+    let fallback = "up";
+    if (head && board) {
+      const blocked = new Set();
+      for (const s of snakes) (s.body ?? []).forEach((p, i, b) => {
+        if (i < b.length - 1) blocked.add(`${p.x},${p.y}`);
+      });
+      body.forEach((p, i) => { if (i < body.length - 1) blocked.add(`${p.x},${p.y}`); });
+      const safe = dirs.find(([, dx, dy]) => {
+        const x = head.x + dx, y = head.y + dy;
+        return x >= 0 && x < board.width && y >= 0 && y < board.height && !blocked.has(`${x},${y}`);
+      });
+      if (safe) fallback = safe[0];
+    }
+    console.log(`MOVE ${gameState?.turn ?? "?"}: ${fallback} (fallback after error)`);
+    return { move: fallback };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +532,11 @@ function evaluate(ctx, st) {
   // Fewer squares than our length usually means a trap. Double-check with our own flood fill,
   // ignoring who reaches each square first.
   const space = territory >= myLen ? territory : soloReach(ctx, me.body[0], stamp, myLen);
+  let myExits = 0;
+  for (let k = 0; k < 4; k++) {
+    const nb = nbr[me.body[0] * 4 + k];
+    if (nb >= 0 && (freeStamp[nb] !== stamp || freeAt[nb] <= 1)) myExits++;
+  }
 
   let rivals = 0;
   let maxRival = 0;
@@ -517,6 +547,12 @@ function evaluate(ctx, st) {
   let score = territory * 10;
   if (space < myLen) score -= 2500 + (myLen - space) * 300;
   else if (territory < myLen) score -= (myLen - territory) * 15;
+  // Territory can be large while the head is stuck behind a one-cell neck.
+  // Prefer positions with several exits and strongly avoid being boxed in.
+  score += myExits * 12;
+  if (myExits === 0) score -= 3000;
+  else if (myExits === 1) score -= 110;
+  else if (myExits === 2) score -= 28;
 
   if (!ctx.solo) {
     score += (ctx.rootRivals - rivals) * 1500;
@@ -525,13 +561,16 @@ function evaluate(ctx, st) {
 
   // Start routing toward food before health is critical: detours and opponents can
   // make the nearest food unreachable between turns.
-  const hungry = me.health < 55 || (rivals > 0 && myLen <= maxRival + 1);
+  const sizeGap = maxRival - myLen;
+  const growthUrgency = Math.max(0, sizeGap);
+  const hungry = me.health < 55 || (rivals > 0 && sizeGap >= -1);
   if (foodDist !== Infinity) {
     if (foodDist >= me.health) score -= 4000;
-    score -= foodDist * (me.health < 20 ? 55 : hungry ? 28 : 2);
-    // A small progress reward helps select a safe food route before distance alone
-    // outweighs useful open territory, especially when we are shorter than a rival.
-    score += (hungry ? 150 : 40) / (foodDist + 1);
+    const cramped = space < myLen * 2 || myExits <= 1;
+    const foodWeight = me.health < 20 ? 55 : hungry ? (cramped ? 26 : 30 + Math.min(growthUrgency, 4) * 4) : 2;
+    score -= foodDist * foodWeight;
+    // Favor safe food more when we need size, but don't trade away an escape route.
+    score += (hungry ? 150 + Math.min(growthUrgency, 4) * 25 : 40) / (foodDist + 1);
   } else if (me.health < 25) {
     score -= (25 - me.health) * 60;
   }
@@ -541,7 +580,24 @@ function evaluate(ctx, st) {
   const myHead = me.body[0];
   for (let i = 1; i < n; i++) {
     const s = snakes[i];
-    if (s.alive && cellDist(ctx, myHead, s.body[0]) === 2) score += s.body.length >= myLen ? -300 : 40;
+    if (!s.alive) continue;
+    const d = cellDist(ctx, myHead, s.body[0]);
+    if (d === 2) score += s.body.length >= myLen ? -300 : 40;
+
+    let enemyExits = 0;
+    for (let k = 0; k < 4; k++) {
+      const nb = nbr[s.body[0] * 4 + k];
+      if (nb >= 0 && (freeStamp[nb] !== stamp || freeAt[nb] <= 1)) enemyExits++;
+    }
+    if (myLen > s.body.length && d <= 5) {
+      // Reward taking away a smaller rival's exits and territory, so the search
+      // looks for walling-off routes instead of only chasing its head.
+      const cramped = Math.max(0, s.body.length * 2 - counts[i]);
+      score += Math.min(cramped, 12) * 8;
+      if (enemyExits <= 2) score += (3 - enemyExits) * 55;
+    } else if (s.body.length >= myLen && enemyExits <= 1 && d <= 3) {
+      score -= 80;
+    }
   }
   return score;
 }
