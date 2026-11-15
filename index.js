@@ -309,11 +309,29 @@ function greedyMove(ctx, st, i, stamp) {
   for (const m of moves) {
     const c = ctx.nbr[s.body[0] * 4 + m];
     let score = 0;
+    let open = 0;
     for (let k = 0; k < 4; k++) {
       const nb = ctx.nbr[c * 4 + k];
-      if (nb >= 0 && ctx.blk[nb] !== stamp) score += 2;
+      if (nb >= 0 && ctx.blk[nb] !== stamp) open++;
     }
-    if (st.food.includes(c)) score += s.health < 50 ? 6 : 1;
+    score += open * 3;
+
+    let foodDist = Infinity;
+    for (const food of st.food) foodDist = Math.min(foodDist, cellDist(ctx, c, food));
+    if (foodDist < Infinity) score -= foodDist * (s.health < 55 ? 2.5 : 0.35);
+
+    const me = st.snakes[0];
+    if (i !== 0 && me.alive) {
+      const d = cellDist(ctx, c, me.body[0]);
+      if (s.body.length > me.body.length) score += Math.max(0, 5 - d) * 1.5;
+      else if (s.body.length < me.body.length) score += Math.min(d, 6) * 0.8;
+      if (s.body.length <= me.body.length && d === 1) score -= 24;
+    }
+
+    const onFood = st.food.includes(c);
+    if (ctx.hazard[c] && !onFood) {
+      score -= ctx.hazard[c] * (s.health < 45 ? ctx.hazardDamage * 1.5 : 4);
+    }
     if (score > bestScore) { bestScore = score; best = m; }
   }
   return best;
