@@ -278,3 +278,10 @@ function move(gameState) {
   console.log(`MOVE ${gameState.turn}: ${best ?? "down (no safe move)"}`);
   return { move: best ?? "down" };
 }
+
+runServer({
+  info: info,
+  start: start,
+  move: move,
+  end: end,
+});
