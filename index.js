@@ -182,69 +182,99 @@ function evaluate(state, myId, w, h, solo, mode) {
 }
 
 function move(gameState) {
-  const started = Date.now();
-  let chosen = "up", bestScore = -Infinity, depthReached = 0;
-  try {
-    const w = gameState.board.width, h = gameState.board.height, you = gameState.you;
-    const snakes = (gameState.board.snakes || []).map((s) => ({
-      id: s.id, body: (s.body || []).map((p) => ({ x: p.x, y: p.y })),
-      health: s.health ?? 100, alive: true, grow: false,
-    }));
-    if (!snakes.some((s) => s.id === you.id)) snakes.push({ id: you.id, body: you.body.map((p) => ({ ...p })), health: you.health, alive: true });
-    const init = { snakes, food: (gameState.board.food || []).map((p) => ({ ...p })), hazards: new Set((gameState.board.hazards || []).map(key)) };
-    const myIndex = snakes.findIndex((s) => s.id === you.id), me = snakes[myIndex];
-    const opponents = snakes.filter((s) => s.id !== you.id), solo = opponents.length === 0;
-    const allMoves = legalMoves(me, w, h);
-    if (!allMoves.length) {
-      const fallback = DIRS.find((d) => inside(add(me.body[0], d), w, h)) || "up";
-      console.log(`TURN ${gameState.turn} move=${fallback} score=-999 depth=0 ms=${Date.now()-started}`);
-      return { move: fallback };
-    }
-    const immediate = allMoves.map((d) => {
-      const candidate = stepState(init, snakes.map((s, i) => i === myIndex ? d : chooseModelMove(s, init, w, h, me)), w, h, gameState.game?.ruleset?.settings?.hazardDamage || 14);
-      return { d, state: candidate, score: evaluate(candidate, you.id, w, h, solo, gameState.mode) };
-    }).sort((a, b) => b.score - a.score);
-    chosen = immediate[0].d; bestScore = immediate[0].score;
-    const deadline = started + 350, hazardDamage = gameState.game?.ruleset?.settings?.hazardDamage || 14;
-    const maxDepth = 4;
-    for (let depth = 1; depth <= maxDepth && Date.now() < deadline; depth++) {
-      let depthBest = chosen, depthScore = -Infinity;
-      for (const root of immediate) {
-        if (Date.now() >= deadline) break;
-        let state = root.state, value = root.score;
-        for (let ply = 1; ply < depth; ply++) {
-          if (Date.now() >= deadline) break;
-          const actor = state.snakes.find((s) => s.id === you.id);
-          if (!actor?.alive) { value = -100000; break; }
-          const ownMoves = legalMoves(actor, w, h);
-          if (!ownMoves.length) { value = -100000; break; }
-          let nextBest = -Infinity;
-          for (const d of ownMoves) {
-            const modelMoves = state.snakes.map((s) => s.id === you.id ? d : chooseModelMove(s, state, w, h, actor));
-            const child = stepState(state, modelMoves, w, h, hazardDamage);
-            nextBest = Math.max(nextBest, evaluate(child, you.id, w, h, solo, gameState.mode));
-          }
-          value = nextBest;
-        }
-        if (value > depthScore) { depthScore = value; depthBest = root.d; }
-      }
-      if (depthScore > -Infinity) { chosen = depthBest; bestScore = depthScore; depthReached = depth; }
-    }
-    console.log(`TURN ${gameState.turn} move=${chosen} score=${bestScore.toFixed(2)} depth=${depthReached} ms=${Date.now()-started}`);
-    return { move: chosen };
-  } catch (err) {
-    const safe = DIRS.find((d) => {
-      const p = add(gameState.you.body[0], d);
-      return inside(p, gameState.board.width, gameState.board.height) && !gameState.you.body.slice(0, -1).some((b) => key(b) === key(p));
-    }) || chosen;
-    console.log(`TURN ${gameState.turn} move=${safe} score=-999 depth=${depthReached} ms=${Date.now()-started}`);
-    return { move: safe };
-  }
-}
+  const { width, height } = gameState.board;
+  const me = gameState.you;
+  const head = me.body[0];
+  const tail = me.body[me.body.length - 1];
+  const dirs = {
+    up: { x: 0, y: 1 },
+    down: { x: 0, y: -1 },
+    left: { x: -1, y: 0 },
+    right: { x: 1, y: 0 },
+  };
+  const key = (p) => `${p.x},${p.y}`;
+  const inBounds = (p) => p.x >= 0 && p.x < width && p.y >= 0 && p.y < height;
+  const dist = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 
-runServer({
-  info: info,
-  start: start,
-  move: move,
-  end: end,
-});
+  // freeAt: the step number from which a square is empty
+  const freeAt = new Map();
+  for (const s of gameState.board.snakes) {
+    const len = s.body.length;
+    s.body.forEach((seg, i) => {
+      let f = len - i;
+      if (i === len - 1 && s.health === 100) f += 1; // just ate, tail stays
+      const k = key(seg);
+      freeAt.set(k, Math.max(freeAt.get(k) || 0, f));
+    });
+  }
+
+  const others = gameState.board.snakes.filter((s) => s.id !== me.id);
+  const maxEnemy = others.reduce((m, s) => Math.max(m, s.length), 0);
+
+  const danger = new Set();
+  for (const s of others) {
+    if (s.length < me.length) continue;
+    for (const d of Object.values(dirs)) {
+      danger.add(key({ x: s.head.x + d.x, y: s.head.y + d.y }));
+    }
+  }
+  const hazards = new Set((gameState.board.hazards || []).map(key));
+
+  // Time-aware flood fill: returns the set of reachable squares
+  const flood = (start) => {
+    const seen = new Set([key(start)]);
+    let frontier = [start];
+    let step = 1;
+    while (frontier.length) {
+      const nextFrontier = [];
+      step++;
+      for (const p of frontier) {
+        for (const d of Object.values(dirs)) {
+          const n = { x: p.x + d.x, y: p.y + d.y };
+          const k = key(n);
+          if (!inBounds(n) || seen.has(k)) continue;
+          if ((freeAt.get(k) || 0) > step) continue;
+          seen.add(k);
+          nextFrontier.push(n);
+        }
+      }
+      frontier = nextFrontier;
+    }
+    return seen;
+  };
+
+  const food = gameState.board.food;
+  const hungry =
+    me.health < 50 || (others.length > 0 && me.length <= maxEnemy);
+  const foodWeight = me.health < 25 ? 12 : 6;
+
+  let best = null;
+  let bestScore = -Infinity;
+  for (const [name, d] of Object.entries(dirs)) {
+    const next = { x: head.x + d.x, y: head.y + d.y };
+    const k = key(next);
+    if (!inBounds(next)) continue;
+    if ((freeAt.get(k) || 0) > 1) continue;
+
+    const reach = flood(next);
+    let score = reach.size;
+    if (reach.size < me.length) score -= 1000;
+    if (me.length > 3 && !reach.has(key(tail))) score -= 300;
+    if (danger.has(k)) score -= 500;
+    if (hazards.has(k)) score -= 30;
+
+    if (hungry && food.length > 0) {
+      score -= foodWeight * Math.min(...food.map((f) => dist(next, f)));
+    } else {
+      score -= 0.5 * dist(next, tail); // stay compact, follow the tail
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = name;
+    }
+  }
+
+  console.log(`MOVE ${gameState.turn}: ${best ?? "down (no safe move)"}`);
+  return { move: best ?? "down" };
+}
