@@ -23,7 +23,7 @@ function info() {
     author: "VeerHarsh",
     color: "#00FF00",
     head: "pirate",
-    tail: "monkey",
+    tail: "tiger-tail",
   };
 }
 
