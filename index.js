@@ -425,7 +425,7 @@ function step(ctx, st, moves) {
 // ---------------------------------------------------------------------------
 
 function evaluate(ctx, st) {
-  const { nbr, freeAt, freeStamp, seen, dist, owner, bestLen, foodMark, counts } = ctx;
+  const { nbr, freeAt, freeStamp, seen, dist, owner, bestLen, reachMask, foodMark, counts } = ctx;
   const snakes = st.snakes;
   const n = snakes.length;
   const me = snakes[0];
@@ -455,37 +455,45 @@ function evaluate(ctx, st) {
     const s = snakes[i];
     if (!s.alive) continue;
     const h = s.body[0];
-    seen[h] = stamp; dist[h] = 0; owner[h] = i; bestLen[h] = s.body.length;
-    q[nq++] = h;
+    if (seen[h] === stamp) {
+      reachMask[h] |= (1 << i);
+    } else {
+      seen[h] = stamp; dist[h] = 0; owner[h] = i; bestLen[h] = s.body.length;
+      reachMask[h] = (1 << i);
+      q[nq++] = h;
+    }
   }
   let foodDist = Infinity;
   for (let d = 1; nq > 0; d++) {
     let nn = 0;
     for (let a = 0; a < nq; a++) {
       const c = q[a];
-      const o = owner[c];
-      if (o < 0) continue;
-      const L = snakes[o].body.length;
+      const mask = reachMask[c];
       for (let k = 0; k < 4; k++) {
         const nb = nbr[c * 4 + k];
         if (nb < 0) continue;
         if (seen[nb] === stamp) {
-          if (dist[nb] === d && owner[nb] !== o) {
-            if (L > bestLen[nb]) { owner[nb] = o; bestLen[nb] = L; }
-            else if (L === bestLen[nb]) owner[nb] = -1;
-          }
+          if (dist[nb] === d) reachMask[nb] |= mask;
           continue;
         }
         if (freeStamp[nb] === stamp && freeAt[nb] > d) continue;
-        seen[nb] = stamp; dist[nb] = d; owner[nb] = o; bestLen[nb] = L;
+        seen[nb] = stamp; dist[nb] = d; owner[nb] = -1; bestLen[nb] = 0; reachMask[nb] = mask;
         nxt[nn++] = nb;
       }
     }
     for (let a = 0; a < nn; a++) {
-      const o = owner[nxt[a]];
-      if (o < 0) continue;
-      counts[o]++;
-      if (o === 0 && foodDist === Infinity && foodMark[nxt[a]] === stamp) foodDist = d;
+      const c = nxt[a], mask = reachMask[c];
+      let longest = -1, winner = -1, tied = false;
+      for (let i = 0; i < n; i++) {
+        if (!(mask & (1 << i)) || !snakes[i].alive) continue;
+        const length = snakes[i].body.length;
+        if (length > longest) { longest = length; winner = i; tied = false; }
+        else if (length === longest) tied = true;
+      }
+      owner[c] = tied ? -1 : winner;
+      bestLen[c] = longest;
+      if (owner[c] >= 0) counts[owner[c]]++;
+      if (owner[c] === 0 && foodDist === Infinity && foodMark[c] === stamp) foodDist = d;
     }
     const tmp = q; q = nxt; nxt = tmp; nq = nn;
   }
@@ -603,6 +611,7 @@ function buildContext(gs) {
     dist: new Int32Array(N),
     owner: new Int8Array(N),
     bestLen: new Int32Array(N),
+    reachMask: new Uint32Array(N),
     q1: new Int32Array(N),
     q2: new Int32Array(N),
     nodes: 0,
