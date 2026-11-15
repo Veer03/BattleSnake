@@ -90,7 +90,7 @@ const LOST = LOSS + 200 * PLY; // values <= LOST are forced losses
 // itself only gets part of it. MOVE_BUDGET_MS can lower or raise the ceiling.
 // The HTTP request also needs time for Node, Express, and network overhead.
 // Keep the search short enough to leave a large margin under the 500 ms limit.
-const MAX_BUDGET_MS = Math.min(Number(process.env.MOVE_BUDGET_MS) || 55, 55);
+const MAX_BUDGET_MS = Math.min(Number(process.env.MOVE_BUDGET_MS) || 85, 85);
 const MIN_BUDGET_MS = 5;
 const SAFETY_MS = 100;
 const MAX_DEPTH = 64;
@@ -120,20 +120,6 @@ function chooseMove(gameState) {
   ctx.counts = new Int32Array(n);
   ctx.rootRivals = n - 1;
   ctx.solo = n === 1;
-
-  // Decide which rivals get the full worst-case treatment; the rest follow a cheap policy.
-  const myHead = root.snakes[0].body[0];
-  const byDistance = [];
-  for (let i = 1; i < n; i++) byDistance.push(i);
-  byDistance.sort((a, b) => cellDist(ctx, myHead, root.snakes[a].body[0]) - cellDist(ctx, myHead, root.snakes[b].body[0]));
-  ctx.inTree = new Uint8Array(n);
-  let treeCount = 0;
-  for (const i of byDistance) {
-    if (treeCount < TREE_RIVALS || cellDist(ctx, myHead, root.snakes[i].body[0]) <= TREE_RADIUS) {
-      ctx.inTree[i] = 1;
-      treeCount++;
-    }
-  }
 
   const stamp = markBlocked(ctx, root);
   const moves = legalMoves(ctx, root, 0, stamp);
@@ -281,9 +267,18 @@ function rivalPlan(ctx, st, stamp) {
   const fixed = new Array(n).fill(0);
   const idx = [];
   const lists = [];
+  const candidates = [];
+  const myHead = st.snakes[0].body[0];
+  for (let i = 1; i < n; i++) {
+    if (st.snakes[i].alive) candidates.push({ i, d: cellDist(ctx, myHead, st.snakes[i].body[0]) });
+  }
+  candidates.sort((a, b) => a.d - b.d);
+  const tracked = new Set(candidates.slice(0, TREE_RIVALS).map((x) => x.i));
+  for (const x of candidates) if (x.d <= TREE_RADIUS) tracked.add(x.i);
+
   for (let i = 1; i < n; i++) {
     if (!st.snakes[i].alive) continue;
-    if (ctx.inTree[i]) {
+    if (tracked.has(i)) {
       const l = legalMoves(ctx, st, i, stamp);
       idx.push(i);
       lists.push(l.length ? l : [0]); // trapped rival: any move, it dies
