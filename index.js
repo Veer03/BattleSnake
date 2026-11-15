@@ -114,6 +114,26 @@ function flood(head, snakes, selfId, w, h) {
   return seen.size;
 }
 
+function pathDistance(start, targets, snakes, w, h) {
+  if (!targets.length) return Infinity;
+  const targetSet = new Set(targets.map(key));
+  if (targetSet.has(key(start))) return 0;
+  const blocked = new Set();
+  for (const s of snakes) if (s.alive) s.body.forEach((p, i) => {
+    if (i !== s.body.length - 1) blocked.add(key(p));
+  });
+  blocked.delete(key(start));
+  const seen = new Set([key(start)]), q = [{ p: start, d: 0 }];
+  for (let i = 0; i < q.length; i++) for (const dir of DIRS) {
+    const p = add(q[i].p, dir), k = key(p);
+    if (!inside(p, w, h) || blocked.has(k) || seen.has(k)) continue;
+    if (targetSet.has(k)) return q[i].d + 1;
+    seen.add(k);
+    q.push({ p, d: q[i].d + 1 });
+  }
+  return Infinity;
+}
+
 function territory(state, w, h) {
   const dist = new Map(), owners = new Map(), q = [];
   for (const s of state.snakes) if (s.alive) {
@@ -139,13 +159,19 @@ function evaluate(state, myId, w, h, solo, mode) {
   const territoryCounts = territory(state, w, h), board = w * h;
   const largest = Math.max(...alive.map((s) => s.body.length));
   const longest = me.body.length >= largest;
-  const foodDist = Math.min(Infinity, ...state.food.map((f) => manhattan(me.body[0], f)));
+  const foodDist = pathDistance(me.body[0], state.food, alive, w, h);
+  const tailDist = me.body.length > 1
+    ? pathDistance(me.body[0], [me.body[me.body.length - 1]], alive, w, h)
+    : Infinity;
   let score = Math.min(area, me.body.length * 3) * (solo ? 2.4 : 1.2);
   score += (territoryCounts[myId] || 0) * (solo ? 0.08 : others.length === 1 ? 0.7 : 0.35);
   score += me.health * 0.16 + me.body.length * (solo ? 1.4 : 2.2);
   if (area < me.body.length) score -= (me.body.length - area) * (mode === "survival" ? 20 : 14);
-  if (!longest && Number.isFinite(foodDist)) score -= foodDist * (me.health < 40 ? 2.2 : 0.75);
-  else if (me.health < 40 && Number.isFinite(foodDist)) score -= foodDist * 1.5;
+  if (Number.isFinite(foodDist) && (!longest || me.health < 40)) {
+    score -= foodDist * (me.health < 40 ? 2.4 : 0.8);
+    if (foodDist >= me.health) score -= 1000;
+  }
+  if (Number.isFinite(tailDist)) score += Math.max(0, me.body.length - tailDist) * 0.25;
   if (others.length) for (const enemy of others) {
     const d = manhattan(me.body[0], enemy.body[0]);
     if (me.body.length > enemy.body.length) score += Math.max(0, 5 - d) * (mode === "aggressive" ? 2.2 : 0.8);
