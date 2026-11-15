@@ -90,9 +90,12 @@ const LOST = LOSS + 200 * PLY; // values <= LOST are forced losses
 // itself only gets part of it. MOVE_BUDGET_MS can lower or raise the ceiling.
 // The HTTP request also needs time for Node, Express, and network overhead.
 // Keep the search short enough to leave a large margin under the 500 ms limit.
-const MAX_BUDGET_MS = Math.min(Number(process.env.MOVE_BUDGET_MS) || 85, 85);
+// A 1v1 board has only one adversary branch, so a larger bounded search is useful.
+const MAX_BUDGET_MS = Math.min(Number(process.env.MOVE_BUDGET_MS) || 160, 160);
 const MIN_BUDGET_MS = 5;
-const SAFETY_MS = 100;
+const SAFETY_MS = 120;
+const FIRST_MOVE_BUDGET_MS = 100;
+const UNMEASURED_BUDGET_MS = 120;
 const MAX_DEPTH = 64;
 
 // Rivals whose every reply is explored: the two nearest, plus anyone whose head is this close.
@@ -571,7 +574,7 @@ function evaluate(ctx, st) {
 
   if (!ctx.solo) {
     score += (ctx.rootRivals - rivals) * 1500;
-    if (rivals) score += Math.max(-6, Math.min(6, myLen - maxRival)) * 70;
+    if (rivals) score += Math.max(-6, Math.min(6, myLen - maxRival)) * 100;
   }
 
   // Start routing toward food before health is critical: detours and opponents can
@@ -723,7 +726,11 @@ function timeBudget(gs) {
   let budget = Math.min(MAX_BUDGET_MS, timeout * 0.6);
   const memo = games.get(memoKey(gs));
   const latency = Number(gs.you?.latency);
-  if (memo && Number.isFinite(latency)) {
+  if (!memo) {
+    budget = Math.min(budget, FIRST_MOVE_BUDGET_MS);
+  } else if (!Number.isFinite(latency)) {
+    budget = Math.min(budget, UNMEASURED_BUDGET_MS);
+  } else {
     if (latency === 0) {
       // Battlesnake reports 0 when the previous reply timed out: halve the budget.
       budget = Math.min(budget, memo.budget * 0.5);
