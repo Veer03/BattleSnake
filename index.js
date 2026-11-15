@@ -493,10 +493,12 @@ function evaluate(ctx, st) {
     if (rivals) score += Math.max(-6, Math.min(6, myLen - maxRival)) * 70;
   }
 
-  const hungry = me.health < 35 || (rivals > 0 && myLen <= maxRival + 1);
+  // Start routing toward food before health is critical: detours and opponents can
+  // make the nearest food unreachable between turns.
+  const hungry = me.health < 55 || (rivals > 0 && myLen <= maxRival + 1);
   if (foodDist !== Infinity) {
     if (foodDist >= me.health) score -= 4000;
-    score -= foodDist * (me.health < 20 ? 40 : hungry ? 12 : 2);
+    score -= foodDist * (me.health < 20 ? 55 : hungry ? 18 : 2);
   } else if (me.health < 25) {
     score -= (25 - me.health) * 60;
   }
