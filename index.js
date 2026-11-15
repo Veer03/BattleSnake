@@ -210,7 +210,7 @@ function maxNode(ctx, st, depth, ply, alpha, beta) {
     return evaluate(ctx, st);
   }
   const stamp = markBlocked(ctx, st);
-  const mine = legalMoves(ctx, st, 0, stamp);
+  const mine = quickOrder(ctx, st, legalMoves(ctx, st, 0, stamp));
   if (!mine.length) return LOSS + (ply + 1) * PLY;
   const plan = rivalPlan(ctx, st, stamp);
   let best = -Infinity;
@@ -273,7 +273,10 @@ function rivalPlan(ctx, st, stamp) {
     if (st.snakes[i].alive) candidates.push({ i, d: cellDist(ctx, myHead, st.snakes[i].body[0]) });
   }
   candidates.sort((a, b) => a.d - b.d);
-  const tracked = new Set(candidates.slice(0, TREE_RIVALS).map((x) => x.i));
+  // On 11x11, every rival can become an immediate threat within a few turns.
+  // Model all their legal replies instead of guessing for the farthest snake.
+  const trackCount = ctx.N <= 121 ? candidates.length : TREE_RIVALS;
+  const tracked = new Set(candidates.slice(0, trackCount).map((x) => x.i));
   for (const x of candidates) if (x.d <= TREE_RADIUS) tracked.add(x.i);
 
   for (let i = 1; i < n; i++) {
@@ -524,6 +527,10 @@ function evaluate(ctx, st) {
 
   const myLen = me.body.length;
   const territory = counts[0];
+  const tail = me.body[myLen - 1];
+  const tailReachable = myLen > 1 && seen[tail] === stamp &&
+    (ctx.solo || owner[tail] === 0);
+  const tailDistance = tailReachable ? dist[tail] : Infinity;
   // Fewer squares than our length usually means a trap. Double-check with our own flood fill,
   // ignoring who reaches each square first.
   const space = territory >= myLen ? territory : soloReach(ctx, me.body[0], stamp, myLen);
@@ -540,6 +547,9 @@ function evaluate(ctx, st) {
   }
 
   let score = territory * 10;
+  // In long solo runs, a reachable tail is a reliable escape route through
+  // your own moving body. Penalize positions that lose that route.
+  if (ctx.solo && myLen > 1) score += Number.isFinite(tailDistance) ? 35 : -180;
   if (space < myLen) score -= 2500 + (myLen - space) * 300;
   else if (territory < myLen) score -= (myLen - territory) * 15;
   // Territory can be large while the head is stuck behind a one-cell neck.
@@ -558,7 +568,9 @@ function evaluate(ctx, st) {
   // make the nearest food unreachable between turns.
   const sizeGap = maxRival - myLen;
   const growthUrgency = Math.max(0, sizeGap);
-  const hungry = me.health < 55 || (rivals > 0 && sizeGap >= -1);
+  const foodPressure = Number.isFinite(foodDist) && me.health <= foodDist + 25;
+  const hungry = me.health < 55 || (foodPressure && (ctx.solo || myLen < maxRival)) ||
+    (rivals > 0 && sizeGap >= -1);
   if (foodDist !== Infinity) {
     if (foodDist >= me.health) score -= 4000;
     const cramped = space < myLen * 2 || myExits <= 1;
