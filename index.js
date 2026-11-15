@@ -63,9 +63,11 @@ const LOST = LOSS + 200 * PLY; // values <= LOST are forced losses
 
 // Time limits. Battlesnake allows 500 ms per move including network time, so the search
 // itself only gets part of it. MOVE_BUDGET_MS can lower or raise the ceiling.
-const MAX_BUDGET_MS = Number(process.env.MOVE_BUDGET_MS) || 300;
-const MIN_BUDGET_MS = 20;
-const SAFETY_MS = 60;
+// The HTTP request also needs time for Node, Express, and network overhead.
+// Keep the search short enough to leave a large margin under the 500 ms limit.
+const MAX_BUDGET_MS = Math.min(Number(process.env.MOVE_BUDGET_MS) || 55, 55);
+const MIN_BUDGET_MS = 5;
+const SAFETY_MS = 100;
 const MAX_DEPTH = 64;
 
 // Rivals whose every reply is explored: the two nearest, plus anyone whose head is this close.
@@ -189,7 +191,7 @@ function salvagePartial(results, order, lastScore, fallback) {
 
 // Our turn to choose: take the best of our moves.
 function maxNode(ctx, st, depth, ply, alpha, beta) {
-  if ((++ctx.nodes & 127) === 0 && performance.now() > ctx.deadline) throw TIMEOUT;
+  if ((++ctx.nodes & 7) === 0 && performance.now() > ctx.deadline) throw TIMEOUT;
   const over = terminal(ctx, st, ply);
   if (over !== null) return over;
   if (depth === 0) {
