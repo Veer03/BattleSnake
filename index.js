@@ -193,11 +193,12 @@ function salvagePartial(results, order, lastScore, fallback) {
   if (!results.length) return fallback;
   let top = results[0];
   for (const r of results) if (r.v > top.v) top = r;
-  if (top.v > LOST) return top.m;
-  // The moves searched so far all lose at this depth; prefer one not yet shown to lose.
-  const lost = new Set(results.filter((r) => r.v <= LOST).map((r) => r.m));
-  const alt = order.find((m) => !lost.has(m) && !(lastScore.get(m) <= LOST));
-  return alt ?? fallback;
+  if (top.v >= WON) return top.m;
+  const searched = new Map(results.map((r) => [r.m, r.v]));
+  const allAlternativesLose = order.every((m) =>
+    (searched.has(m) ? searched.get(m) : lastScore.get(m)) <= LOST
+  );
+  return allAlternativesLose ? top.m : fallback;
 }
 
 // Our turn to choose: take the best of our moves.
@@ -312,13 +313,23 @@ function quickOrder(ctx, st, moves) {
   const scored = moves.map((m) => {
     const c = ctx.nbr[me.body[0] * 4 + m];
     let risk = 0;
+    let open = 0;
     for (let i = 1; i < st.snakes.length; i++) {
       const s = st.snakes[i];
       if (s.alive && s.body.length >= me.body.length && cellDist(ctx, c, s.body[0]) === 1) risk++;
     }
-    return { m, risk };
+    for (let k = 0; k < 4; k++) {
+      const nb = ctx.nbr[c * 4 + k];
+      if (nb >= 0 && ctx.blk[nb] !== ctx.stamp) open++;
+    }
+    let foodDist = Infinity;
+    for (const food of st.food) foodDist = Math.min(foodDist, cellDist(ctx, c, food));
+    let orderScore = open * 8;
+    if (Number.isFinite(foodDist)) orderScore -= foodDist * (me.health < 60 ? 3 : 0.75);
+    if (ctx.hazard[c]) orderScore -= ctx.hazard[c] * ctx.hazardDamage;
+    return { m, risk, orderScore };
   });
-  scored.sort((a, b) => a.risk - b.risk);
+  scored.sort((a, b) => a.risk - b.risk || b.orderScore - a.orderScore);
   return scored.map((s) => s.m);
 }
 
