@@ -21,7 +21,7 @@ function info() {
   return {
     apiversion: "1",
     author: "VeerHarsh",
-    color: "#00FF00",
+    color: "#cc7f19",
     head: "tiger-king",
     tail: "tiger-tail",
   };
