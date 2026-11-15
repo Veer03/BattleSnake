@@ -21,20 +21,22 @@ function info() {
   return {
     apiversion: "1",
     author: "VeerHarsh", // TODO: Your Battlesnake Username
-    color: "#00FF00", // TODO: Choose color
-    head: "default", // TODO: Choose head
-    tail: "default", // TODO: Choose tail
+    color: "#0000ff", // TODO: Choose color
+    head: "smile", // TODO: Choose head
+    tail: "hook", // TODO: Choose tail
   };
 }
 
 // start is called when your Battlesnake begins a game
 function start(gameState) {
   console.log("GAME START");
+  getGameTiming(gameState);
 }
 
 // end is called when your Battlesnake finishes a game
 function end(gameState) {
   console.log("GAME OVER\n");
+  timingByGame.delete(gameState.game?.id || "__unknown_game__");
 }
 
 // ---------------------------------------------------------------------------
@@ -56,17 +58,15 @@ const DIR_INDEX = { up: 0, down: 1, left: 2, right: 3 };
 
 const MAX_DEPTH = 20; // hard cap on rounds searched
 const ENUM_OPPONENTS = 2; // how many nearest opponents get every reply tried
-const SAFETY_MS = 120; // extra margin on top of the measured overhead
+const SAFETY_MS = 160; // extra margin on top of the measured overhead
 const MIN_BUDGET_MS = 20; // never search for less than this
-const MAX_BUDGET_MS = 300; // never search for more than this
+const MAX_BUDGET_MS = 120; // keep enough time for network and queued requests
+const EARLY_BUDGET_MS = 40; // cap for the first few turns (open board)
 const TIMEOUT = "timeout";
 
 // Time the engine spends waiting on us that is NOT our thinking (network,
 // Windows localhost delays, a busy laptop...). Starts pessimistic and is
 // corrected every turn from what the engine reports.
-let overheadEst = 300;
-let lastComputeMs = 0;
-let lastMove = null; // { turn, dir, x, y } so we can check the engine played it
 const DIR_VEC = {
   up: { x: 0, y: 1 },
   down: { x: 0, y: -1 },
@@ -78,6 +78,24 @@ const DIR_VEC = {
 // nbr[cell] = [up, down, left, right] neighbour cells (-1 = wall).
 // A cell is just y * width + x.
 let boardCache = null;
+const timingByGame = new Map();
+
+function getGameTiming(gameState) {
+  const gameId = gameState.game?.id || "__unknown_game__";
+  if (!timingByGame.has(gameId)) {
+    if (timingByGame.size >= 128) {
+      const oldestGame = timingByGame.keys().next().value;
+      timingByGame.delete(oldestGame);
+    }
+    timingByGame.set(gameId, {
+      overheadEst: 300,
+      lastComputeMs: 0,
+      lastMove: null,
+    });
+  }
+  return { gameId, timing: timingByGame.get(gameId) };
+}
+
 function getBoard(W, H) {
   if (boardCache && boardCache.W === W && boardCache.H === H) return boardCache;
   const N = W * H;
@@ -154,13 +172,13 @@ function step(ctx, state, dests) {
       continue;
     }
     const body = [d].concat(s.body); // new head goes on the front
-    let health = s.health - 1;
-    if (ctx.hazard[d]) health -= ctx.hazardDmg;
+    let health = ctx.constrictor ? s.health : s.health - 1;
+    if (!ctx.constrictor && ctx.hazard[d]) health -= ctx.hazardDmg;
     if (food[d]) {
-      health = 100; // eating: back to full health and the tail stays (we grow)
+      if (!ctx.constrictor) health = 100; // eating: back to full health and the tail stays (we grow)
       if (!eaten) eaten = [];
       eaten.push(d);
-    } else {
+    } else if (!ctx.constrictor) {
       body.pop(); // not eating: the tail moves forward
     }
     snakes[i] = { body, health, alive: health > 0 };
@@ -174,7 +192,7 @@ function step(ctx, state, dests) {
     const h = a.body[0];
     let dead = false;
     for (let j = 0; j < n && !dead; j++) {
-      if (!old[j].alive) continue;
+      if (!snakes[j].alive) continue;
       const b = snakes[j].body;
       for (let k = 1; k < b.length; k++) {
         if (b[k] === h) {
@@ -248,7 +266,7 @@ function evaluate(ctx, state) {
     if (!s.alive) continue;
     const L = s.body.length;
     for (let k = 0; k < L; k++) {
-      const t = L - k;
+      const t = ctx.constrictor ? 32767 : L - k;
       const c = s.body[k];
       if (t > freeAt[c]) freeAt[c] = t;
     }
@@ -264,6 +282,9 @@ function evaluate(ctx, state) {
   // --- A) Space I can reach on my own + distance to the nearest food ---
   const stamp = ++ctx.seenStamp;
   const head = me.body[0];
+  const myDist = ctx.myDist;
+  myDist.fill(32767);
+  myDist[head] = 0;
   seen[head] = stamp;
   cur[curN++] = head;
   let area = 0;
@@ -278,6 +299,7 @@ function evaluate(ctx, state) {
         const m = nb[k];
         if (m < 0 || seen[m] === stamp || freeAt[m] > d) continue;
         seen[m] = stamp;
+        myDist[m] = d;
         area++;
         if (nearestFood === 99 && food[m]) nearestFood = d;
         nxt[nxtN++] = m;
@@ -352,28 +374,133 @@ function evaluate(ctx, state) {
     oppN++;
   }
 
+  const opponentDist = ctx.oppDist;
+  opponentDist.fill(32767);
+  let oppCur = ctx.qa;
+  let oppNext = ctx.qb;
+  let oppCurN = 0;
+  for (let i = 0; i < n; i++) {
+    if (i === ctx.meIdx || !snakes[i].alive) continue;
+    const h = snakes[i].body[0];
+    if (opponentDist[h] === 32767) {
+      opponentDist[h] = 0;
+      oppCur[oppCurN++] = h;
+    }
+  }
+  let opponentLayer = 0;
+  while (oppCurN > 0) {
+    opponentLayer++;
+    let oppNextN = 0;
+    for (let q = 0; q < oppCurN; q++) {
+      const nb = nbr[oppCur[q]];
+      for (let k = 0; k < 4; k++) {
+        const m = nb[k];
+        if (m < 0 || opponentDist[m] !== 32767 || freeAt[m] > opponentLayer)
+          continue;
+        opponentDist[m] = opponentLayer;
+        oppNext[oppNextN++] = m;
+      }
+    }
+    const swap = oppCur;
+    oppCur = oppNext;
+    oppNext = swap;
+    oppCurN = oppNextN;
+  }
+
+  const hp = me.health;
+  const hungerValue = Math.max(0, 60 - hp) * 0.3;
+  // Grow more eagerly while small or when we need length to contest a larger
+  // opponent. Once we already have the length advantage, value open space and
+  // safe health-restoring food more than adding extra body to a crowded board.
+  const lengthDeficit = Math.min(6, Math.max(0, maxOppLen - myLen));
+  const earlyGrowthValue =
+    myLen < 8 ? 30 : myLen > maxOppLen ? 8 : 14;
+  const growthValue = earlyGrowthValue + lengthDeficit * 4;
+  const roomFactor = area < myLen * 1.5 ? 0.55 : 1;
+  const postGrowthRoomFactor = area < (myLen + 1) * 1.25 ? 0.65 : 1;
+  let bestFoodReward = 0;
+  for (let c = 0; c < food.length; c++) {
+    if (!food[c] || myDist[c] === 32767) continue;
+    const myEta = myDist[c];
+    let raceFactor = 1;
+    if (oppN > 0 && opponentDist[c] <= myEta) {
+      if (opponentDist[c] === myEta) {
+        raceFactor = myLen > maxOppLen ? 0.8 : hp < 50 ? 0.65 : 0.35;
+      } else {
+        raceFactor = hp < 50 ? 0.25 : 0.1;
+      }
+    }
+    const travelCost = myEta * (hp < 50 ? 0.7 + (50 - hp) / 10 : 0.4);
+    const reward =
+      ((growthValue * roomFactor * postGrowthRoomFactor + hungerValue) /
+        (1 + myEta * 0.18)) *
+        raceFactor -
+      travelCost;
+    if (reward > bestFoodReward) bestFoodReward = reward;
+  }
+
   // --- C) Combine everything into one number ---
   let score = 2 * (cnt[ctx.meIdx] - (oppN > 0 ? oppSum / oppN : 0)); // area control
   score += 6 * myLen; // growing is good
   if (oppN > 0) score += 4 * (myLen - maxOppLen); // being longer wins head-to-heads
 
+  if (myLen > maxOppLen && area >= myLen * 1.5) {
+    for (let i = 0; i < n; i++) {
+      if (i === ctx.meIdx || !snakes[i].alive) continue;
+      const shortfall = snakes[i].body.length - cnt[i];
+      if (shortfall > 0) score += Math.min(80, 20 + shortfall * 8);
+    }
+  }
+
   // Trap check: less room than my own body length = I'm walling myself in.
-  if (area < myLen) score -= (myLen - area) * 20 + 100;
+  if (area < myLen) score -= (myLen - area) * 25 + 200;
+  else if (area < myLen * 1.5) score -= (myLen * 1.5 - area) * 4;
 
   // Food: a gentle pull always, a strong pull when hungry.
-  const hp = me.health;
   if (nearestFood === 99) {
     if (hp < 50) score -= (50 - hp) * 2; // hungry and no food reachable
   } else {
     if (nearestFood > hp) score -= 1000; // will starve before reaching food
-    score -= nearestFood * (hp < 50 ? 0.7 + (50 - hp) / 10 : 0.7);
+    score += bestFoodReward;
+    if (bestFoodReward === 0)
+      score -= nearestFood * (hp < 50 ? 1 + (50 - hp) / 10 : 0.8);
+  }
+
+  let nextMoves = 0;
+  let headToHeadThreats = 0;
+  const myNextLength = myLen + (ctx.constrictor ? 1 : 0);
+  for (const dest of legalDests(ctx, me.body)) {
+    if (dest < 0 || freeAt[dest] > 1) continue;
+    nextMoves++;
+    const myLengthAfterMove =
+      myNextLength + (!ctx.constrictor && food[dest] ? 1 : 0);
+    let threatened = false;
+    for (let i = 0; i < n && !threatened; i++) {
+      if (i === ctx.meIdx || !snakes[i].alive) continue;
+      const opponent = snakes[i];
+      const opponentHeadMoves = nbr[opponent.body[0]];
+      const opponentNeck = opponent.body.length > 1 ? opponent.body[1] : -1;
+      if (!opponentHeadMoves.includes(dest) || dest === opponentNeck) continue;
+      const opponentLengthAfterMove =
+        opponent.body.length + (ctx.constrictor || food[dest] ? 1 : 0);
+      if (opponentLengthAfterMove >= myLengthAfterMove) threatened = true;
+    }
+    if (threatened) headToHeadThreats++;
+  }
+  if (nextMoves === 0) {
+    score -= 50000;
+  } else {
+    if (nextMoves === 1) score -= 60;
+    else if (nextMoves === 2) score -= 15;
+    score -= headToHeadThreats * 40;
+    if (headToHeadThreats === nextMoves) score -= 25000;
   }
   return score;
 }
 
 // MY turn to choose. Returns the best score I can force from this board.
 function maxNode(ctx, state, depth, alpha, beta, ply) {
-  if (ctx.canTimeout && (++ctx.nodes & 63) === 0 && Date.now() > ctx.deadline) {
+  if (ctx.canTimeout && (++ctx.nodes & 15) === 0 && Date.now() > ctx.deadline) {
     throw TIMEOUT;
   }
   const snakes = state.snakes;
@@ -414,7 +541,8 @@ function minNode(ctx, state, myDest, depth, alpha, beta, ply) {
   for (let i = 0; i < n; i++) {
     if (!snakes[i].alive) continue;
     const b = snakes[i].body;
-    for (let k = 0; k < b.length - 1; k++) occ[b[k]] = stamp;
+    const bodyLimit = ctx.constrictor ? b.length : b.length - 1;
+    for (let k = 0; k < bodyLimit; k++) occ[b[k]] = stamp;
   }
 
   const dests = new Array(n).fill(-1);
@@ -439,6 +567,29 @@ function minNode(ctx, state, myDest, depth, alpha, beta, ply) {
     });
   }
   opps.sort((a, b) => a.dist - b.dist);
+
+  const meLength = snakes[ctx.meIdx].body.length;
+  const myNextLength =
+    meLength + (ctx.constrictor || state.food[myDest] ? 1 : 0);
+  for (const opp of opps) {
+    const body = snakes[opp.i].body;
+    const nextLength = body.length + (ctx.constrictor ? 1 : 0);
+    opp.list.sort((a, b) => {
+      const threat = (dest) => {
+        if (dest < 0) return -Infinity;
+        const theirLength =
+          nextLength + (!ctx.constrictor && state.food[dest] ? 1 : 0);
+        if (dest === myDest) {
+          return theirLength >= myNextLength ? 10000 : -10000;
+        }
+        const distance =
+          Math.abs((dest % W) - (myDest % W)) +
+          Math.abs(Math.floor(dest / W) - Math.floor(myDest / W));
+        return (theirLength >= myNextLength ? 100 : 10) / (distance + 1);
+      };
+      return threat(b) - threat(a);
+    });
+  }
 
   const enumerated = [];
   for (let j = 0; j < opps.length; j++) {
@@ -468,7 +619,7 @@ function minNode(ctx, state, myDest, depth, alpha, beta, ply) {
 }
 
 // Picks the best of the candidate moves by searching as deep as time allows.
-function lookahead(gameState, candidates, startTime) {
+function lookahead(gameState, candidates, startTime, timing) {
   const B = getBoard(gameState.board.width, gameState.board.height);
   const { state, meIdx } = buildState(gameState, B);
 
@@ -477,18 +628,30 @@ function lookahead(gameState, candidates, startTime) {
   // that leaves the overhead we can't control.
   const timeout = gameState.game?.timeout ?? 500;
   const latency = parseInt(gameState.you.latency, 10);
-  if (latency > 0 && lastComputeMs > 0) {
-    const observed = Math.max(0, latency - lastComputeMs);
-    overheadEst =
-      observed > overheadEst ? observed : 0.7 * overheadEst + 0.3 * observed;
+  if (latency > 0 && timing.lastComputeMs > 0) {
+    const observed = Math.max(0, latency - timing.lastComputeMs);
+    timing.overheadEst =
+      observed > timing.overheadEst
+        ? observed
+        : 0.7 * timing.overheadEst + 0.3 * observed;
   }
-  const budget = Math.min(
-    MAX_BUDGET_MS,
-    Math.max(MIN_BUDGET_MS, Math.floor(timeout - overheadEst - SAFETY_MS)),
-  );
+  // The first few turns are an open board where deep search adds almost nothing,
+  // so think less there and spend the saved time as safety margin.
+  const cap = gameState.turn < 5 ? EARLY_BUDGET_MS : MAX_BUDGET_MS;
+  const availableBudget = Math.floor(timeout - timing.overheadEst - SAFETY_MS);
+  const budget =
+    availableBudget < MIN_BUDGET_MS ? 0 : Math.min(cap, availableBudget);
+  if (budget === 0) {
+    console.log(
+      `LOOKAHEAD skipped: only ${Math.max(0, availableBudget)}ms available after latency reserve`,
+    );
+    return null;
+  }
 
   const hazard = new Uint8Array(B.N);
   for (const h of gameState.board.hazards || []) hazard[h.y * B.W + h.x] = 1;
+  const constrictor =
+    gameState.game?.ruleset?.name?.toLowerCase() === "constrictor";
 
   const ctx = {
     W: B.W,
@@ -498,6 +661,7 @@ function lookahead(gameState, candidates, startTime) {
     hasOpps: state.snakes.length > 1,
     hazard,
     hazardDmg: gameState.game?.ruleset?.settings?.hazardDamagePerTurn ?? 14,
+    constrictor,
     deadline: startTime + budget,
     canTimeout: false,
     nodes: 0,
@@ -509,6 +673,8 @@ function lookahead(gameState, candidates, startTime) {
     freeAt: new Int16Array(B.N),
     owner: new Int8Array(B.N),
     dist: new Int16Array(B.N),
+    myDist: new Int16Array(B.N),
+    oppDist: new Int16Array(B.N),
     qa: new Int16Array(B.N),
     qb: new Int16Array(B.N),
     cnt: new Int16Array(state.snakes.length + 1),
@@ -557,7 +723,7 @@ function lookahead(gameState, candidates, startTime) {
   }
 
   console.log(
-    `LOOKAHEAD depth ${depthDone}, ${Date.now() - startTime}ms of ${budget}ms, score ${Math.round(bestScore)}, nodes ${ctx.nodes}, engine latency ${gameState.you.latency}, overhead ~${Math.round(overheadEst)}ms`,
+    `LOOKAHEAD depth ${depthDone}, ${Date.now() - startTime}ms of ${budget}ms, score ${Math.round(bestScore)}, nodes ${ctx.nodes}, engine latency ${gameState.you.latency}, overhead ~${Math.round(timing.overheadEst)}ms`,
   );
   return bestDir;
 }
@@ -567,6 +733,9 @@ function lookahead(gameState, candidates, startTime) {
 // See https://docs.battlesnake.com/api/example-move for available data
 function move(gameState) {
   const startTime = Date.now();
+  const { timing } = getGameTiming(gameState);
+  const constrictor =
+    gameState.game?.ruleset?.name?.toLowerCase() === "constrictor";
 
   let isMoveSafe = {
     up: true,
@@ -582,12 +751,15 @@ function move(gameState) {
   // Did the engine actually play the move we sent last turn? If not, our
   // answer arrived too late (the engine then repeats the old direction),
   // so assume more overhead and think for less time.
-  if (lastMove && gameState.turn === lastMove.turn + 1) {
-    const v = DIR_VEC[lastMove.dir];
-    if (myHead.x !== lastMove.x + v.x || myHead.y !== lastMove.y + v.y) {
-      overheadEst = Math.min(400, overheadEst + 100);
+  if (timing.lastMove && gameState.turn === timing.lastMove.turn + 1) {
+    const v = DIR_VEC[timing.lastMove.dir];
+    if (
+      myHead.x !== timing.lastMove.x + v.x ||
+      myHead.y !== timing.lastMove.y + v.y
+    ) {
+      timing.overheadEst = Math.min(400, timing.overheadEst + 100);
       console.log(
-        `LATE: turn ${lastMove.turn} answer was not played. Assuming ${overheadEst}ms overhead.`,
+        `LATE: turn ${timing.lastMove.turn} answer was not played. Assuming ${timing.overheadEst}ms overhead.`,
       );
     }
   }
@@ -646,13 +818,14 @@ function move(gameState) {
   const blocked = new Set();
   for (const snake of opponents) {
     snake.body.forEach((segment, i) => {
-      const isTail = i === snake.body.length - 1 && snake.body.length > 1;
+      const isTail =
+        !constrictor && i === snake.body.length - 1 && snake.body.length > 1;
       if (!isTail) blocked.add(`${segment.x},${segment.y}`);
     });
   }
   // gameState.board.snakes already includes us, but add myBody to be safe
   myBody.forEach((segment, i) => {
-    const isTail = i === myBody.length - 1 && myBody.length > 1;
+    const isTail = !constrictor && i === myBody.length - 1 && myBody.length > 1;
     if (!isTail) blocked.add(`${segment.x},${segment.y}`);
   });
 
@@ -698,14 +871,19 @@ function move(gameState) {
   // We hand the search ALL safe moves so it can still pick a risky head-to-head
   // square if every alternative is worse.
   try {
-    const searched = lookahead(gameState, safeMoves, startTime);
+    const searched = lookahead(gameState, safeMoves, startTime, timing);
     if (searched) nextMove = searched;
   } catch (e) {
     console.log("SEARCH ERROR, using fallback move:", e);
   }
 
-  lastMove = { turn: gameState.turn, dir: nextMove, x: myHead.x, y: myHead.y };
-  lastComputeMs = Date.now() - startTime;
+  timing.lastMove = {
+    turn: gameState.turn,
+    dir: nextMove,
+    x: myHead.x,
+    y: myHead.y,
+  };
+  timing.lastComputeMs = Date.now() - startTime;
   console.log(`MOVE ${gameState.turn}: ${nextMove}`);
   return { move: nextMove };
 }
