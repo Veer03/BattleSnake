@@ -318,9 +318,12 @@ function greedyMove(ctx, st, i, stamp) {
 
     let foodDist = Infinity;
     for (const food of st.food) foodDist = Math.min(foodDist, cellDist(ctx, c, food));
-    if (foodDist < Infinity) score -= foodDist * (s.health < 55 ? 2.5 : 0.35);
-
     const me = st.snakes[0];
+    const isBehind = me.alive && s.body.length <= me.body.length;
+    if (foodDist < Infinity) {
+      score -= foodDist * (s.health < 55 ? 3 : isBehind ? 2.2 : 1.1);
+    }
+
     if (i !== 0 && me.alive) {
       const d = cellDist(ctx, c, me.body[0]);
       if (s.body.length > me.body.length) score += Math.max(0, 5 - d) * 1.5;
@@ -329,6 +332,7 @@ function greedyMove(ctx, st, i, stamp) {
     }
 
     const onFood = st.food.includes(c);
+    if (onFood) score += isBehind ? 28 : 14;
     if (ctx.hazard[c] && !onFood) {
       score -= ctx.hazard[c] * (s.health < 45 ? ctx.hazardDamage * 1.5 : 4);
     }
@@ -524,7 +528,10 @@ function evaluate(ctx, st) {
   const hungry = me.health < 55 || (rivals > 0 && myLen <= maxRival + 1);
   if (foodDist !== Infinity) {
     if (foodDist >= me.health) score -= 4000;
-    score -= foodDist * (me.health < 20 ? 55 : hungry ? 18 : 2);
+    score -= foodDist * (me.health < 20 ? 55 : hungry ? 28 : 2);
+    // A small progress reward helps select a safe food route before distance alone
+    // outweighs useful open territory, especially when we are shorter than a rival.
+    score += (hungry ? 150 : 40) / (foodDist + 1);
   } else if (me.health < 25) {
     score -= (25 - me.health) * 60;
   }
