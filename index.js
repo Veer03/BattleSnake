@@ -60,8 +60,8 @@ const MAX_DEPTH = 20; // hard cap on rounds searched
 const ENUM_OPPONENTS = 2; // how many nearest opponents get every reply tried
 const SAFETY_MS = 160; // extra margin on top of the measured overhead
 const MIN_BUDGET_MS = 20; // never search for less than this
-const MAX_BUDGET_MS = 120; // keep enough time for network and queued requests
-const EARLY_BUDGET_MS = 40; // cap for the first few turns (open board)
+const MAX_BUDGET_MS = 80; // cap search time to leave more response margin
+const EARLY_BUDGET_MS = 30; // cap for the first few turns (open board)
 const TIMEOUT = "timeout";
 
 // Time the engine spends waiting on us that is NOT our thinking (network,
@@ -91,9 +91,71 @@ function getGameTiming(gameState) {
       overheadEst: 300,
       lastComputeMs: 0,
       lastMove: null,
+      opponentProfiles: new Map(),
     });
   }
   return { gameId, timing: timingByGame.get(gameId) };
+}
+
+// Learn a small amount about each opponent from its actual moves. This is a
+// soft preference signal only; the search still considers dangerous replies.
+function updateOpponentProfiles(gameState, timing) {
+  const turn = gameState.turn;
+  const ownHead = gameState.you.body[0];
+  const foods = gameState.board.food || [];
+
+  for (const snake of gameState.board.snakes) {
+    if (snake.id === gameState.you.id || !snake.body?.length) continue;
+    let profile = timing.opponentProfiles.get(snake.id);
+    if (!profile) {
+      profile = {
+        foodBias: 0.5,
+        aggression: 0.5,
+        foodSamples: 0,
+        aggressionSamples: 0,
+      };
+      timing.opponentProfiles.set(snake.id, profile);
+    }
+
+    const head = snake.body[0];
+    if (profile.lastTurn === turn - 1 && profile.lastHead) {
+      const oldFoodDistance = profile.lastFood
+        .filter((f) => foods.some((now) => now.x === f.x && now.y === f.y))
+        .reduce(
+          (best, f) => Math.min(best, Math.abs(profile.lastHead.x - f.x) + Math.abs(profile.lastHead.y - f.y)),
+          Infinity,
+        );
+      const newFoodDistance = profile.lastFood
+        .filter((f) => foods.some((now) => now.x === f.x && now.y === f.y))
+        .reduce(
+          (best, f) => Math.min(best, Math.abs(head.x - f.x) + Math.abs(head.y - f.y)),
+          Infinity,
+        );
+
+      if (oldFoodDistance < Infinity && newFoodDistance !== oldFoodDistance) {
+        profile.foodBias =
+          profile.foodBias * 0.8 + (newFoodDistance < oldFoodDistance ? 0.2 : 0);
+        profile.foodSamples++;
+      }
+
+      const oldOpponentDistance =
+        Math.abs(profile.lastHead.x - profile.lastOwnHead.x) +
+        Math.abs(profile.lastHead.y - profile.lastOwnHead.y);
+      const newOpponentDistance =
+        Math.abs(head.x - ownHead.x) + Math.abs(head.y - ownHead.y);
+      if (newOpponentDistance !== oldOpponentDistance) {
+        profile.aggression =
+          profile.aggression * 0.8 +
+          (newOpponentDistance < oldOpponentDistance ? 0.2 : 0);
+        profile.aggressionSamples++;
+      }
+    }
+
+    profile.lastTurn = turn;
+    profile.lastHead = { x: head.x, y: head.y };
+    profile.lastOwnHead = { x: ownHead.x, y: ownHead.y };
+    profile.lastFood = foods.map((f) => ({ x: f.x, y: f.y }));
+  }
 }
 
 function getBoard(W, H) {
@@ -423,12 +485,29 @@ function evaluate(ctx, state) {
     if (!food[c] || myDist[c] === 32767) continue;
     const myEta = myDist[c];
     let raceFactor = 1;
+    let foodHunterBias = 0;
     if (oppN > 0 && opponentDist[c] <= myEta) {
       if (opponentDist[c] === myEta) {
         raceFactor = myLen > maxOppLen ? 0.8 : hp < 50 ? 0.65 : 0.35;
       } else {
         raceFactor = hp < 50 ? 0.25 : 0.1;
       }
+      for (let i = 0; i < n; i++) {
+        if (i === ctx.meIdx || !snakes[i].alive) continue;
+        const profile = ctx.opponentProfiles.get(ctx.opponentIds[i]);
+        const confidence = profile
+          ? Math.min(1, profile.foodSamples / 8)
+          : 0;
+        if (profile) {
+          foodHunterBias = Math.max(
+            foodHunterBias,
+            profile.foodBias * confidence,
+          );
+        }
+      }
+      // A food-focused opponent is more likely to take a close race. Keep this
+      // adjustment small because the minimax simulation already checks replies.
+      raceFactor *= 1 - 0.2 * foodHunterBias;
     }
     const travelCost = myEta * (hp < 50 ? 0.7 + (50 - hp) / 10 : 0.4);
     const reward =
@@ -468,6 +547,7 @@ function evaluate(ctx, state) {
 
   let nextMoves = 0;
   let headToHeadThreats = 0;
+  let headToHeadRisk = 0;
   const myNextLength = myLen + (ctx.constrictor ? 1 : 0);
   for (const dest of legalDests(ctx, me.body)) {
     if (dest < 0 || freeAt[dest] > 1) continue;
@@ -483,7 +563,15 @@ function evaluate(ctx, state) {
       if (!opponentHeadMoves.includes(dest) || dest === opponentNeck) continue;
       const opponentLengthAfterMove =
         opponent.body.length + (ctx.constrictor || food[dest] ? 1 : 0);
-      if (opponentLengthAfterMove >= myLengthAfterMove) threatened = true;
+      if (opponentLengthAfterMove >= myLengthAfterMove) {
+        threatened = true;
+        const profile = ctx.opponentProfiles.get(ctx.opponentIds[i]);
+        const confidence = profile
+          ? Math.min(1, profile.aggressionSamples / 8)
+          : 0;
+        headToHeadRisk +=
+          40 + (profile ? profile.aggression * confidence * 30 : 0);
+      }
     }
     if (threatened) headToHeadThreats++;
   }
@@ -492,7 +580,7 @@ function evaluate(ctx, state) {
   } else {
     if (nextMoves === 1) score -= 60;
     else if (nextMoves === 2) score -= 15;
-    score -= headToHeadThreats * 40;
+    score -= headToHeadRisk;
     if (headToHeadThreats === nextMoves) score -= 25000;
   }
   return score;
@@ -622,6 +710,9 @@ function minNode(ctx, state, myDest, depth, alpha, beta, ply) {
 function lookahead(gameState, candidates, startTime, timing) {
   const B = getBoard(gameState.board.width, gameState.board.height);
   const { state, meIdx } = buildState(gameState, B);
+  const opponentIds = gameState.board.snakes.map((snake) => snake.id);
+  if (opponentIds.length < state.snakes.length)
+    opponentIds.push(gameState.you.id);
 
   // Time budget = timeout - (measured overhead) - safety margin.
   // The engine tells us last turn's total latency; minus our own thinking time
@@ -659,6 +750,8 @@ function lookahead(gameState, candidates, startTime, timing) {
     nbr: B.nbr,
     meIdx,
     hasOpps: state.snakes.length > 1,
+    opponentIds,
+    opponentProfiles: timing.opponentProfiles,
     hazard,
     hazardDmg: gameState.game?.ruleset?.settings?.hazardDamagePerTurn ?? 14,
     constrictor,
@@ -734,6 +827,7 @@ function lookahead(gameState, candidates, startTime, timing) {
 function move(gameState) {
   const startTime = Date.now();
   const { timing } = getGameTiming(gameState);
+  updateOpponentProfiles(gameState, timing);
   const constrictor =
     gameState.game?.ruleset?.name?.toLowerCase() === "constrictor";
 
