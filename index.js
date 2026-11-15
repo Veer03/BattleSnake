@@ -504,6 +504,7 @@ function evaluate(ctx, st) {
     }
   }
   let foodDist = Infinity;
+  let contestedFoodDist = Infinity;
   for (let d = 1; nq > 0; d++) {
     let nn = 0;
     for (let a = 0; a < nq; a++) {
@@ -534,6 +535,8 @@ function evaluate(ctx, st) {
       bestLen[c] = longest;
       if (owner[c] >= 0) counts[owner[c]]++;
       if (owner[c] === 0 && foodDist === Infinity && foodMark[c] === stamp) foodDist = d;
+      else if (owner[c] === -1 && (mask & 1) && longest === me.body.length &&
+        contestedFoodDist === Infinity && foodMark[c] === stamp) contestedFoodDist = d;
     }
     const tmp = q; q = nxt; nxt = tmp; nq = nn;
   }
@@ -581,16 +584,20 @@ function evaluate(ctx, st) {
   // make the nearest food unreachable between turns.
   const sizeGap = maxRival - myLen;
   const growthUrgency = Math.max(0, sizeGap);
-  const foodPressure = Number.isFinite(foodDist) && me.health <= foodDist + 25;
+  const hasSafeFood = Number.isFinite(foodDist);
+  const targetFoodDist = hasSafeFood ? foodDist : contestedFoodDist;
+  const contestedFood = !hasSafeFood && Number.isFinite(contestedFoodDist);
+  const foodPressure = Number.isFinite(targetFoodDist) && me.health <= targetFoodDist + 25;
   const hungry = me.health < 55 || (foodPressure && (ctx.solo || myLen < maxRival)) ||
     (rivals > 0 && sizeGap >= -1);
-  if (foodDist !== Infinity) {
-    if (foodDist >= me.health) score -= 4000;
+  if (Number.isFinite(targetFoodDist)) {
+    if (targetFoodDist >= me.health) score -= 4000;
     const cramped = space < myLen * 2 || myExits <= 1;
     const foodWeight = me.health < 20 ? 55 : hungry ? (cramped ? 26 : 30 + Math.min(growthUrgency, 4) * 4) : 2;
-    score -= foodDist * foodWeight;
+    score -= targetFoodDist * foodWeight * (contestedFood ? 0.65 : 1);
     // Favor safe food more when we need size, but don't trade away an escape route.
-    score += (hungry ? 150 + Math.min(growthUrgency, 4) * 25 : 40) / (foodDist + 1);
+    score += (hungry ? 150 + Math.min(growthUrgency, 4) * 25 : 40) *
+      (contestedFood ? 0.6 : 1) / (targetFoodDist + 1);
   } else if (me.health < 25) {
     score -= (25 - me.health) * 60;
   }
@@ -610,13 +617,15 @@ function evaluate(ctx, st) {
       if (nb >= 0 && (freeStamp[nb] !== stamp || freeAt[nb] <= 1)) enemyExits++;
     }
     if (myLen > s.body.length && d <= 5) {
-      // Reward taking away a smaller rival's exits and territory, so the search
-      // looks for walling-off routes instead of only chasing its head.
+      // When longer, pressure from the flank and reduce a smaller rival's exits.
       const cramped = Math.max(0, s.body.length * 2 - counts[i]);
-      score += Math.min(cramped, 12) * 8;
-      if (enemyExits <= 2) score += (3 - enemyExits) * 55;
-    } else if (s.body.length >= myLen && enemyExits <= 1 && d <= 3) {
-      score -= 80;
+      score += Math.min(cramped, 16) * (myLen >= s.body.length + 2 ? 10 : 6);
+      if (enemyExits <= 2) score += (3 - enemyExits) * 70;
+      if (d >= 3 && d <= 5) score += (6 - d) * 18;
+    } else if (s.body.length >= myLen) {
+      // Equal heads tie-kill; a longer rival can win the collision, so disengage early.
+      if (d <= 4) score -= (5 - d) * (s.body.length > myLen ? 70 : 50);
+      if (enemyExits <= 1 && d <= 3) score -= 80;
     }
   }
   return score;
