@@ -474,9 +474,14 @@ function evaluate(ctx, state) {
   // Grow more eagerly while small or when we need length to contest a larger
   // opponent. Once we already have the length advantage, value open space and
   // safe health-restoring food more than adding extra body to a crowded board.
-  const lengthDeficit = Math.min(6, Math.max(0, maxOppLen - myLen));
+  // Phase the plan by relative size: secure food while small or within one
+  // segment of the biggest rival, then spend the size lead on safe territory
+  // pressure. In a solo game keep the existing survival-oriented growth value.
+  const lengthDeficit =
+    oppN > 0 ? Math.min(6, Math.max(0, maxOppLen + 2 - myLen)) : 0;
+  const comfortablyAhead = oppN > 0 && myLen >= maxOppLen + 2;
   const earlyGrowthValue =
-    myLen < 8 ? 42 : myLen > maxOppLen ? 8 : 14;
+    myLen < 8 ? 42 : comfortablyAhead ? 8 : oppN > 0 ? 18 : 8;
   const growthValue = earlyGrowthValue + lengthDeficit * 4;
   const roomFactor = area < myLen * 1.5 ? 0.55 : 1;
   const postGrowthRoomFactor = area < (myLen + 1) * 1.25 ? 0.65 : 1;
@@ -523,7 +528,7 @@ function evaluate(ctx, state) {
   score += 6 * myLen; // growing is good
   if (oppN > 0) score += 4 * (myLen - maxOppLen); // being longer wins head-to-heads
 
-  if (myLen > maxOppLen && area >= myLen * 1.5) {
+  if (comfortablyAhead && area >= myLen * 1.5) {
     for (let i = 0; i < n; i++) {
       if (i === ctx.meIdx || !snakes[i].alive) continue;
       const opponent = snakes[i];
@@ -1006,6 +1011,22 @@ function move(gameState) {
     return !dangerous.has(`${next.x},${next.y}`);
   });
   const candidates = saferMoves.length > 0 ? saferMoves : safeMoves;
+  const maxOpponentLength = Math.max(
+    0,
+    ...opponents
+      .filter((snake) => snake.id !== gameState.you.id)
+      .map((snake) => snake.length || snake.body.length),
+  );
+  const strategyPhase =
+    safeMoves.length <= 2
+      ? "SPACE"
+      : myBody.length < 8 ||
+          (maxOpponentLength > 0 && myBody.length < maxOpponentLength + 2)
+        ? "GROW"
+        : "CONTROL";
+  console.log(
+    `PLAN turn ${gameState.turn}: ${strategyPhase}, length ${myBody.length}/${maxOpponentLength}, food ${gameState.board.food.length}, exits ${safeMoves.length}`,
+  );
 
   // Fallback pick in case the search can't answer (random safe move)
   let nextMove = candidates[Math.floor(Math.random() * candidates.length)];
