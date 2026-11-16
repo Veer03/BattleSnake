@@ -476,7 +476,7 @@ function evaluate(ctx, state) {
   // safe health-restoring food more than adding extra body to a crowded board.
   const lengthDeficit = Math.min(6, Math.max(0, maxOppLen - myLen));
   const earlyGrowthValue =
-    myLen < 8 ? 30 : myLen > maxOppLen ? 8 : 14;
+    myLen < 8 ? 36 : myLen > maxOppLen ? 8 : 14;
   const growthValue = earlyGrowthValue + lengthDeficit * 4;
   const roomFactor = area < myLen * 1.5 ? 0.55 : 1;
   const postGrowthRoomFactor = area < (myLen + 1) * 1.25 ? 0.65 : 1;
@@ -526,14 +526,24 @@ function evaluate(ctx, state) {
   if (myLen > maxOppLen && area >= myLen * 1.5) {
     for (let i = 0; i < n; i++) {
       if (i === ctx.meIdx || !snakes[i].alive) continue;
-      const shortfall = snakes[i].body.length - cnt[i];
+      const opponent = snakes[i];
+      const shortfall = opponent.body.length - cnt[i];
       if (shortfall > 0) score += Math.min(80, 20 + shortfall * 8);
+
+      // When we have the size lead and plenty of room, reward safe pressure
+      // that leaves a smaller opponent with fewer exits. This is a positional
+      // bonus, not a command to chase into a head-to-head.
+      let opponentExits = 0;
+      for (const dest of legalDests(ctx, opponent.body)) {
+        if (dest >= 0 && freeAt[dest] <= 1) opponentExits++;
+      }
+      if (opponentExits <= 2) score += (3 - opponentExits) * 18;
     }
   }
 
   // Trap check: less room than my own body length = I'm walling myself in.
   if (area < myLen) score -= (myLen - area) * 25 + 200;
-  else if (area < myLen * 1.5) score -= (myLen * 1.5 - area) * 4;
+  else if (area < myLen * 1.5) score -= (myLen * 1.5 - area) * 6;
 
   // Food: a gentle pull always, a strong pull when hungry.
   if (nearestFood === 99) {
@@ -578,8 +588,12 @@ function evaluate(ctx, state) {
   if (nextMoves === 0) {
     score -= 50000;
   } else {
-    if (nextMoves === 1) score -= 60;
-    else if (nextMoves === 2) score -= 15;
+    // A single exit is already a warning; a single exit under head pressure
+    // is usually a trap several turns in the making.
+    if (nextMoves === 1) score -= 180;
+    else if (nextMoves === 2) score -= 40;
+    const unthreatenedExits = nextMoves - headToHeadThreats;
+    if (nextMoves > 1 && unthreatenedExits === 1) score -= 60;
     score -= headToHeadRisk;
     if (headToHeadThreats === nextMoves) score -= 25000;
   }
