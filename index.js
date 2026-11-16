@@ -559,7 +559,7 @@ function evaluate(ctx, st) {
     ? soloReach(ctx, me.body[0], stamp, spaceCap)
     : spaceCap;
   const space = Math.min(territory, reachableSpace);
-  const survivalMode = space < myLen * 1.5 || myExits <= 2 || me.health < 30;
+  const survivalMode = space < myLen * 1.75 || myExits <= 2 || me.health < 40;
 
   let rivals = 0;
   let maxRival = 0;
@@ -570,9 +570,12 @@ function evaluate(ctx, st) {
   let score = territory * 10;
   // In long solo runs, a reachable tail is a reliable escape route through
   // your own moving body. Penalize positions that lose that route.
-  if (ctx.solo && myLen > 1) score += Number.isFinite(tailDistance) ? 35 : -180;
+  if (myLen > 1 && (ctx.solo || survivalMode)) {
+    score += Number.isFinite(tailDistance) ? Math.max(25, 80 - tailDistance * 2) : -180;
+  }
   if (space < myLen) score -= 2500 + (myLen - space) * 300;
-  else if (space < myLen * 1.5) score -= (myLen * 1.5 - space) * 90;
+  else if (space < myLen * 1.5) score -= (myLen * 1.5 - space) * 120;
+  else if (space < myLen * 1.75) score -= (myLen * 1.75 - space) * 75;
   else if (space < myLen * 2) score -= (myLen * 2 - space) * 25;
   else if (territory < myLen) score -= (myLen - territory) * 15;
   // Territory can be large while the head is stuck behind a one-cell neck.
@@ -601,11 +604,11 @@ function evaluate(ctx, st) {
     if (targetFoodDist >= me.health) score -= 4000;
     const cramped = space < myLen * 2 || myExits <= 1;
     const foodWeight = me.health < 20 ? 55 : hungry ? (cramped ? 26 : 30 + Math.min(growthUrgency, 4) * 4) : 2;
-    const contestWeight = contestedFood ? (survivalMode ? 0.25 : 0.65) : 1;
+    const contestWeight = contestedFood ? (survivalMode ? 0.15 : 0.65) : 1;
     score -= targetFoodDist * foodWeight * contestWeight;
     // Favor safe food more when we need size, but don't trade away an escape route.
     score += (hungry ? 150 + Math.min(growthUrgency, 4) * 25 : 40) *
-      (contestedFood ? (survivalMode ? 0.25 : 0.6) : 1) / (targetFoodDist + 1);
+      (contestedFood ? (survivalMode ? 0.15 : 0.6) : 1) / (targetFoodDist + 1);
   } else if (me.health < 25) {
     score -= (25 - me.health) * 60;
   }
@@ -632,7 +635,8 @@ function evaluate(ctx, st) {
       if (d >= 3 && d <= 5) score += (6 - d) * 18;
     } else if (s.body.length >= myLen) {
       // Equal heads tie-kill; a longer rival can win the collision, so disengage early.
-      if (d <= 4) score -= (5 - d) * (s.body.length > myLen ? 70 : 50);
+      if (d <= 4) score -= (5 - d) *
+        (s.body.length > myLen ? (survivalMode ? 105 : 70) : (survivalMode ? 75 : 50));
       if (enemyExits <= 1 && d <= 3) score -= 80;
     }
   }
