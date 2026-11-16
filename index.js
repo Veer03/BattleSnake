@@ -476,7 +476,7 @@ function evaluate(ctx, state) {
   // safe health-restoring food more than adding extra body to a crowded board.
   const lengthDeficit = Math.min(6, Math.max(0, maxOppLen - myLen));
   const earlyGrowthValue =
-    myLen < 8 ? 36 : myLen > maxOppLen ? 8 : 14;
+    myLen < 8 ? 42 : myLen > maxOppLen ? 8 : 14;
   const growthValue = earlyGrowthValue + lengthDeficit * 4;
   const roomFactor = area < myLen * 1.5 ? 0.55 : 1;
   const postGrowthRoomFactor = area < (myLen + 1) * 1.25 ? 0.65 : 1;
@@ -558,6 +558,8 @@ function evaluate(ctx, state) {
   let nextMoves = 0;
   let headToHeadThreats = 0;
   let headToHeadRisk = 0;
+  let bestFutureExits = 0;
+  let bestUncontestedFutureExits = 0;
   const myNextLength = myLen + (ctx.constrictor ? 1 : 0);
   for (const dest of legalDests(ctx, me.body)) {
     if (dest < 0 || freeAt[dest] > 1) continue;
@@ -584,6 +586,32 @@ function evaluate(ctx, state) {
       }
     }
     if (threatened) headToHeadThreats++;
+
+    // Look one additional move beyond this destination. Estimate exits using
+    // how soon current body squares clear; count squares within two steps of an
+    // equal-or-longer opponent as contested, not safe escape routes.
+    let futureExits = 0;
+    let uncontestedFutureExits = 0;
+    const releaseHorizon = food[dest] ? 3 : 2;
+    for (const future of nbr[dest]) {
+      if (future < 0 || future === head || freeAt[future] > releaseHorizon)
+        continue;
+      futureExits++;
+      if (
+        maxOppLen < myLengthAfterMove ||
+        opponentDist[future] > 2
+      ) {
+        uncontestedFutureExits++;
+      }
+    }
+    if (
+      uncontestedFutureExits > bestUncontestedFutureExits ||
+      (uncontestedFutureExits === bestUncontestedFutureExits &&
+        futureExits > bestFutureExits)
+    ) {
+      bestFutureExits = futureExits;
+      bestUncontestedFutureExits = uncontestedFutureExits;
+    }
   }
   if (nextMoves === 0) {
     score -= 50000;
@@ -596,6 +624,14 @@ function evaluate(ctx, state) {
     if (nextMoves > 1 && unthreatenedExits === 1) score -= 60;
     score -= headToHeadRisk;
     if (headToHeadThreats === nextMoves) score -= 25000;
+
+    // Prefer moves that leave room to turn again, especially when a longer
+    // opponent can contest the only continuation.
+    if (bestFutureExits === 0) score -= 220;
+    else if (bestFutureExits === 1) score -= 110;
+    else if (bestFutureExits === 2) score -= 35;
+    if (bestFutureExits > 0 && bestUncontestedFutureExits === 0)
+      score -= 100;
   }
   return score;
 }
