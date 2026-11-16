@@ -372,6 +372,18 @@ function evaluate(ctx, state) {
     nxt = tmp;
     curN = nxtN;
   }
+  // The head is included in the practical space count. A position that can
+  // reach less room than its body length is usually doomed even if food or
+  // opponent pressure makes its short-term score look attractive.
+  const usableSpace = area + 1;
+  let currentExits = 0;
+  for (const dest of legalDests(ctx, me.body)) {
+    if (dest >= 0 && freeAt[dest] <= 1) currentExits++;
+  }
+  const tail = me.body[myLen - 1];
+  const tailDistance = myLen > 1 ? myDist[tail] : 32767;
+  const tailReachable = tailDistance !== 32767;
+  const survivalMode = usableSpace < myLen * 1.75 || currentExits <= 2 || me.health < 40;
 
   // --- B) Voronoi: who gets to each square first? ---
   // All snakes spread out one step at a time. A square goes to whoever
@@ -528,7 +540,7 @@ function evaluate(ctx, state) {
   score += 6 * myLen; // growing is good
   if (oppN > 0) score += 4 * (myLen - maxOppLen); // being longer wins head-to-heads
 
-  if (comfortablyAhead && area >= myLen * 1.5) {
+  if (comfortablyAhead && area >= myLen * 1.75 && currentExits >= 3 && me.health >= 40) {
     for (let i = 0; i < n; i++) {
       if (i === ctx.meIdx || !snakes[i].alive) continue;
       const opponent = snakes[i];
@@ -546,9 +558,17 @@ function evaluate(ctx, state) {
     }
   }
 
-  // Trap check: less room than my own body length = I'm walling myself in.
-  if (area < myLen) score -= (myLen - area) * 25 + 200;
-  else if (area < myLen * 1.5) score -= (myLen * 1.5 - area) * 6;
+  // Penalize low-survival space sharply so food and length cannot tempt the
+  // search into a pocket that cannot hold the body as it moves.
+  if (usableSpace < myLen) score -= 2500 + (myLen - usableSpace) * 300;
+  else if (usableSpace < myLen * 1.5) score -= (myLen * 1.5 - usableSpace) * 120;
+  else if (usableSpace < myLen * 1.75) score -= (myLen * 1.75 - usableSpace) * 75;
+
+  // Following our own moving tail is a useful escape route in tight spaces.
+  // The time-aware reachability BFS above already accounts for body release.
+  if (myLen > 1 && (ctx.solo || survivalMode)) {
+    score += tailReachable ? Math.max(25, 80 - tailDistance * 2) : -180;
+  }
 
   // Food: a gentle pull always, a strong pull when hungry.
   if (nearestFood === 99) {
