@@ -547,14 +547,19 @@ function evaluate(ctx, st) {
   const tailReachable = myLen > 1 && seen[tail] === stamp &&
     (ctx.solo || owner[tail] === 0);
   const tailDistance = tailReachable ? dist[tail] : Infinity;
-  // Fewer squares than our length usually means a trap. Double-check with our own flood fill,
-  // ignoring who reaches each square first.
-  const space = territory >= myLen ? territory : soloReach(ctx, me.body[0], stamp, myLen);
   let myExits = 0;
   for (let k = 0; k < 4; k++) {
     const nb = nbr[me.body[0] * 4 + k];
     if (nb >= 0 && (freeStamp[nb] !== stamp || freeAt[nb] <= 1)) myExits++;
   }
+  // Measure usable space up to twice our length. Voronoi territory alone can
+  // look generous even when our own body leaves only a small pocket.
+  const spaceCap = Math.min(ctx.N - 1, myLen * 2);
+  const reachableSpace = territory < spaceCap || myExits <= 2
+    ? soloReach(ctx, me.body[0], stamp, spaceCap)
+    : spaceCap;
+  const space = Math.min(territory, reachableSpace);
+  const survivalMode = space < myLen * 1.5 || myExits <= 2 || me.health < 30;
 
   let rivals = 0;
   let maxRival = 0;
@@ -567,6 +572,8 @@ function evaluate(ctx, st) {
   // your own moving body. Penalize positions that lose that route.
   if (ctx.solo && myLen > 1) score += Number.isFinite(tailDistance) ? 35 : -180;
   if (space < myLen) score -= 2500 + (myLen - space) * 300;
+  else if (space < myLen * 1.5) score -= (myLen * 1.5 - space) * 90;
+  else if (space < myLen * 2) score -= (myLen * 2 - space) * 25;
   else if (territory < myLen) score -= (myLen - territory) * 15;
   // Territory can be large while the head is stuck behind a one-cell neck.
   // Prefer positions with several exits and strongly avoid being boxed in.
@@ -594,10 +601,11 @@ function evaluate(ctx, st) {
     if (targetFoodDist >= me.health) score -= 4000;
     const cramped = space < myLen * 2 || myExits <= 1;
     const foodWeight = me.health < 20 ? 55 : hungry ? (cramped ? 26 : 30 + Math.min(growthUrgency, 4) * 4) : 2;
-    score -= targetFoodDist * foodWeight * (contestedFood ? 0.65 : 1);
+    const contestWeight = contestedFood ? (survivalMode ? 0.25 : 0.65) : 1;
+    score -= targetFoodDist * foodWeight * contestWeight;
     // Favor safe food more when we need size, but don't trade away an escape route.
     score += (hungry ? 150 + Math.min(growthUrgency, 4) * 25 : 40) *
-      (contestedFood ? 0.6 : 1) / (targetFoodDist + 1);
+      (contestedFood ? (survivalMode ? 0.25 : 0.6) : 1) / (targetFoodDist + 1);
   } else if (me.health < 25) {
     score -= (25 - me.health) * 60;
   }
@@ -616,7 +624,7 @@ function evaluate(ctx, st) {
       const nb = nbr[s.body[0] * 4 + k];
       if (nb >= 0 && (freeStamp[nb] !== stamp || freeAt[nb] <= 1)) enemyExits++;
     }
-    if (myLen > s.body.length && d <= 5) {
+    if (!survivalMode && myLen > s.body.length && d <= 5) {
       // When longer, pressure from the flank and reduce a smaller rival's exits.
       const cramped = Math.max(0, s.body.length * 2 - counts[i]);
       score += Math.min(cramped, 16) * (myLen >= s.body.length + 2 ? 10 : 6);
